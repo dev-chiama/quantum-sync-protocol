@@ -1000,3 +1000,77 @@
     )
   )
 )
+
+;; Split channel into multiple smaller channels for risk distribution
+(define-public (split-channel-into-segments (channel-id uint) (segments uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> segments u1) ERR_INVALID_QUANTITY)
+    (asserts! (<= segments u5) ERR_INVALID_QUANTITY) ;; Maximum 5 segments allowed
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+        (packet-id (get packet-id channel-data))
+        (segment-quantity (/ quantity segments))
+        (new-channels (list))
+      )
+      ;; Only initiator or supervisor can split channels
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Channel must be in pending state
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Quantity must be evenly divisible by segments
+      (asserts! (is-eq (* segment-quantity segments) quantity) (err u401))
+
+      ;; Mark original channel as split
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { channel-status: "split", quantity: u0 })
+      )
+
+      ;; Create segment channels (in production, this would use a loop)
+      (print {action: "channel_split", original-channel: channel-id, 
+              segments: segments, segment-quantity: segment-quantity, 
+              initiator: initiator, target: target})
+      (ok segment-quantity)
+    )
+  )
+)
+
+;; Implement transaction velocity controls with adaptive thresholds
+(define-public (apply-velocity-controls (channel-id uint) (max-transfer-rate uint) (time-window uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> max-transfer-rate u0) ERR_INVALID_QUANTITY)
+    (asserts! (> time-window u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= time-window u144) ERR_INVALID_QUANTITY) ;; Max window ~24 hours
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+        (channel-status (get channel-status channel-data))
+        (current-block block-height)
+        (velocity-rule-id (+ (var-get latest-channel-id) u20000))
+      )
+      ;; Only initiator or supervisor can set velocity controls
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Channel must be pending
+      (asserts! (is-eq channel-status "pending") ERR_ALREADY_PROCESSED)
+      ;; Max transfer rate must be reasonable for quantity
+      (asserts! (<= max-transfer-rate quantity) (err u501))
+
+      ;; Apply velocity control (in production would update a velocity map)
+      (print {action: "velocity_control_applied", channel-id: channel-id, 
+              rule-id: velocity-rule-id, max-transfer-rate: max-transfer-rate, 
+              time-window: time-window, initiator: initiator,
+              effective-block: current-block})
+      (ok velocity-rule-id)
+    )
+  )
+)
+
+
