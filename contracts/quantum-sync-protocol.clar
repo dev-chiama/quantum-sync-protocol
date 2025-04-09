@@ -417,3 +417,86 @@
     )
   )
 )
+
+;; Add comprehensive audit record to channel
+(define-public (create-audit-record (channel-id uint) (audit-type (string-ascii 20)) (audit-data (buff 128)) (auditor principal))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+      )
+      ;; Only supervisor, initiator or target can add audit records
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) 
+                   (is-eq tx-sender initiator) 
+                   (is-eq tx-sender target)) ERR_UNAUTHORIZED)
+      ;; Valid audit types
+      (asserts! (or (is-eq audit-type "access") 
+                   (is-eq audit-type "modification") 
+                   (is-eq audit-type "transmission")
+                   (is-eq audit-type "authorization")
+                   (is-eq audit-type "compliance")
+                   (is-eq audit-type "verification")) (err u260))
+      ;; Auditor must be valid principal
+      (asserts! (not (is-eq auditor tx-sender)) (err u261))
+
+      (print {action: "audit_record_created", channel-id: channel-id, record-creator: tx-sender, 
+              audit-type: audit-type, audit-timestamp: block-height, auditor: auditor, 
+              data-hash: (hash160 audit-data)})
+      (ok {
+        channel-id: channel-id,
+        audit-id: (+ (var-get latest-channel-id) u10000),
+        audit-block: block-height,
+        audit-type: audit-type
+      })
+    )
+  )
+)
+
+;; Quarantine suspicious channel
+(define-public (quarantine-suspicious-channel (channel-id uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender initiator) (is-eq tx-sender target)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+      (print {action: "channel_quarantined", channel-id: channel-id, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Create phased channel
+(define-public (create-phased-channel (target principal) (packet-id uint) (quantity uint) (phases uint))
+  (let 
+    (
+      (new-id (+ (var-get latest-channel-id) u1))
+      (terminus-date (+ block-height CHANNEL_LIFESPAN_BLOCKS))
+      (phase-quantity (/ quantity phases))
+    )
+    (asserts! (> quantity u0) ERR_INVALID_QUANTITY)
+    (asserts! (> phases u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= phases u5) ERR_INVALID_QUANTITY) ;; Max 5 phases
+    (asserts! (valid-target? target) ERR_INVALID_INITIATOR)
+    (asserts! (is-eq (* phase-quantity phases) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set latest-channel-id new-id)
+          (print {action: "phased_channel_created", channel-id: new-id, initiator: tx-sender, target: target, 
+                  packet-id: packet-id, quantity: quantity, phases: phases, phase-quantity: phase-quantity})
+          (ok new-id)
+        )
+      error ERR_TRANSMISSION_FAILED
+    )
+  )
+)
