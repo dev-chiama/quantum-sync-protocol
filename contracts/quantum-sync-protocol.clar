@@ -329,3 +329,91 @@
   )
 )
 
+;; Set fallback recipient
+(define-public (designate-alternate-recipient (channel-id uint) (alternate-recipient principal))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+      )
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq alternate-recipient tx-sender)) (err u111)) ;; Alternate recipient must be different
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "alternate_designated", channel-id: channel-id, initiator: initiator, alternate: alternate-recipient})
+      (ok true)
+    )
+  )
+)
+
+;; Resolve dispute with mediation
+(define-public (mediate-dispute (channel-id uint) (initiator-allocation uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (<= initiator-allocation u100) ERR_INVALID_QUANTITY) ;; Percentage must be 0-100
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+        (initiator-share (/ (* quantity initiator-allocation) u100))
+        (target-share (- quantity initiator-share))
+      )
+      (asserts! (is-eq (get channel-status channel-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      ;; Send initiator's portion
+      (unwrap! (as-contract (stx-transfer? initiator-share tx-sender initiator)) ERR_TRANSMISSION_FAILED)
+
+      ;; Send target's portion
+      (unwrap! (as-contract (stx-transfer? target-share tx-sender target)) ERR_TRANSMISSION_FAILED)
+
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { channel-status: "mediated" })
+      )
+      (print {action: "dispute_mediated", channel-id: channel-id, initiator: initiator, target: target, 
+              initiator-share: initiator-share, target-share: target-share, initiator-percentage: initiator-allocation})
+      (ok true)
+    )
+  )
+)
+
+
+;; Implement circuit breaker for suspicious activity patterns
+(define-public (trigger-circuit-breaker (threshold-breach-type (string-ascii 30)) (affected-channels (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> (len affected-channels) u0) ERR_INVALID_QUANTITY)
+
+    ;; Valid breach types
+    (asserts! (or (is-eq threshold-breach-type "volume") 
+                 (is-eq threshold-breach-type "frequency") 
+                 (is-eq threshold-breach-type "pattern")
+                 (is-eq threshold-breach-type "geo-anomaly")
+                 (is-eq threshold-breach-type "time-anomaly")) (err u250))
+
+    ;; Process each affected channel
+    (let
+      (
+        (channels-processed u0)
+        (breach-time block-height)
+        (resolution-timeframe (+ block-height u72)) ;; 12-hour resolution window
+      )
+      ;; In a full implementation, this would iterate through affected channels
+      ;; and apply safety measures to each one
+
+      (print {action: "circuit_breaker_triggered", breach-type: threshold-breach-type, 
+              affected-channel-count: (len affected-channels), breach-time: breach-time, 
+              resolution-timeframe: resolution-timeframe, trigger-principal: tx-sender})
+      (ok {
+        affected-channels: affected-channels,
+        breach-type: threshold-breach-type,
+        resolution-time: resolution-timeframe
+      })
+    )
+  )
+)
