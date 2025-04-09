@@ -792,4 +792,73 @@
   )
 )
 
+;; Implement channel merging for optimized processing
+(define-public (merge-channels (source-channel-id uint) (target-channel-id uint) (merge-justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-channel-id? source-channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (valid-channel-id? target-channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (not (is-eq source-channel-id target-channel-id)) (err u270))
+    (let
+      (
+        (source-data (unwrap! (map-get? ChannelRegistry { channel-id: source-channel-id }) ERR_NO_CHANNEL))
+        (target-data (unwrap! (map-get? ChannelRegistry { channel-id: target-channel-id }) ERR_NO_CHANNEL))
+        (source-initiator (get initiator source-data))
+        (target-initiator (get initiator target-data))
+        (source-target (get target source-data))
+        (target-target (get target target-data))
+        (source-quantity (get quantity source-data))
+        (target-quantity (get quantity target-data))
+        (combined-quantity (+ source-quantity target-quantity))
+      )
+      ;; Only supervisor can merge channels
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      ;; Channels must have same initiator and target
+      (asserts! (is-eq source-initiator target-initiator) (err u271))
+      (asserts! (is-eq source-target target-target) (err u272))
+      ;; Both channels must be pending
+      (asserts! (is-eq (get channel-status source-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (is-eq (get channel-status target-data) "pending") ERR_ALREADY_PROCESSED)
+
+      ;; Update target channel with combined quantity
+      (map-set ChannelRegistry
+        { channel-id: target-channel-id }
+        (merge target-data { quantity: combined-quantity })
+      )
+
+      ;; Mark source channel as merged
+      (map-set ChannelRegistry
+        { channel-id: source-channel-id }
+        (merge source-data { channel-status: "merged", quantity: u0 })
+      )
+
+      (print {action: "channels_merged", source-channel: source-channel-id, target-channel: target-channel-id, 
+              initiator: source-initiator, target: source-target, combined-quantity: combined-quantity,
+              justification: merge-justification})
+      (ok combined-quantity)
+    )
+  )
+)
+
+;; Implement graduated security based on transaction value
+(define-public (set-security-tier-thresholds (tier1-threshold uint) (tier2-threshold uint) (tier3-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> tier1-threshold u0) ERR_INVALID_QUANTITY)
+    (asserts! (> tier2-threshold tier1-threshold) ERR_INVALID_QUANTITY)
+    (asserts! (> tier3-threshold tier2-threshold) ERR_INVALID_QUANTITY)
+
+    ;; In a full implementation, these would update persistent variables
+    ;; that track security tier thresholds
+
+    (print {action: "security_tiers_configured", tier1-threshold: tier1-threshold, 
+            tier2-threshold: tier2-threshold, tier3-threshold: tier3-threshold, 
+            configured-by: tx-sender, effective-block: block-height})
+    (ok {
+      tier1-threshold: tier1-threshold,
+      tier2-threshold: tier2-threshold,
+      tier3-threshold: tier3-threshold,
+      config-block: block-height
+    })
+  )
+)
 
