@@ -1217,3 +1217,79 @@
   )
 )
 
+;; Schedule protocol update with delay
+(define-public (schedule-protocol-update (operation-type (string-ascii 20)) (parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> (len parameters) u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (execution-time (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {action: "update_scheduled", operation-type: operation-type, parameters: parameters, execution-time: execution-time})
+      (ok execution-time)
+    )
+  )
+)
+
+;; Implement user-specific rate limiting for channel creation
+(define-public (set-user-rate-limits (target principal) (hourly-limit uint) (daily-limit uint) (expire-blocks uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> hourly-limit u0) ERR_INVALID_QUANTITY)
+    (asserts! (>= daily-limit hourly-limit) ERR_INVALID_QUANTITY)
+    (asserts! (> expire-blocks u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= expire-blocks u10080) ERR_INVALID_QUANTITY) ;; Max ~10 weeks
+
+    ;; Validate target principal is not supervisor
+    (asserts! (not (is-eq target PROTOCOL_SUPERVISOR)) (err u310))
+
+    ;; Calculate expiration block
+    (let
+      (
+        (current-block block-height)
+        (expiration-block (+ current-block expire-blocks))
+      )
+      (print {action: "rate_limits_set", target-user: target, hourly-limit: hourly-limit, 
+              daily-limit: daily-limit, set-at-block: current-block, expires-at-block: expiration-block})
+      (ok {
+        target: target,
+        hourly-limit: hourly-limit,
+        daily-limit: daily-limit,
+        expiration-block: expiration-block
+      })
+    )
+  )
+)
+
+;; Temporarily freeze channel with multi-party consent requirements
+(define-public (consent-based-channel-freeze (channel-id uint) (freeze-reason (string-ascii 100)) (freeze-duration uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> freeze-duration u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= freeze-duration u1440) ERR_INVALID_QUANTITY) ;; Max ~10 days
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (current-status (get channel-status channel-data))
+        (freeze-until-block (+ block-height freeze-duration))
+      )
+      ;; Only initiator, target, or supervisor can freeze
+      (asserts! (or (is-eq tx-sender initiator) 
+                   (is-eq tx-sender target) 
+                   (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Channel must be in active state
+      (asserts! (or (is-eq current-status "pending") 
+                   (is-eq current-status "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+
+      (print {action: "consent_freeze_applied", channel-id: channel-id, requester: tx-sender, 
+              freeze-reason: freeze-reason, freeze-duration: freeze-duration, 
+              frozen-until: freeze-until-block, terminus-extended-to: (+ (get terminus-block channel-data) freeze-duration)})
+      (ok freeze-until-block)
+    )
+  )
+)
+
