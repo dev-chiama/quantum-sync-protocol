@@ -1151,5 +1151,69 @@
   )
 )
 
+;; Implement secure channel suspension with verification challenge
+(define-public (suspend-channel-with-challenge (channel-id uint) (suspension-reason (string-ascii 100)) (challenge-hash (buff 32)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (channel-status (get channel-status channel-data))
+        (suspension-time block-height)
+        (challenge-expiry (+ block-height u144)) ;; 24-hour challenge period
+      )
+      ;; Any authorized party can suspend a channel
+      (asserts! (or (is-eq tx-sender initiator) 
+                   (is-eq tx-sender target) 
+                   (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Channel must be active
+      (asserts! (or (is-eq channel-status "pending") 
+                   (is-eq channel-status "acknowledged")) ERR_ALREADY_PROCESSED)
 
+      ;; Update channel status to suspended
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { channel-status: "suspended" })
+      )
+
+      (print {action: "channel_suspended", channel-id: channel-id, 
+              suspension-initiator: tx-sender, suspension-time: suspension-time,
+              challenge-hash: challenge-hash, challenge-expiry: challenge-expiry,
+              reason: suspension-reason})
+      (ok challenge-expiry)
+    )
+  )
+)
+
+;; Add authorized operator to a channel who can perform certain operations
+(define-public (add-channel-operator (channel-id uint) (operator principal) (permission-flags (list 5 (string-ascii 20))))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+      )
+      ;; Only initiator or supervisor can add operators
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Operator must be different from initiator and target
+      (asserts! (not (is-eq operator initiator)) (err u301))
+      (asserts! (not (is-eq operator target)) (err u302))
+      ;; Channel must be in pending or acknowledged state
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+      ;; Validate permission flags
+      (asserts! (> (len permission-flags) u0) ERR_INVALID_QUANTITY)
+      (asserts! (<= (len permission-flags) u5) ERR_INVALID_QUANTITY)
+
+      (print {action: "operator_added", channel-id: channel-id, initiator: initiator, 
+              operator: operator, permissions: permission-flags, added-at-block: block-height})
+      (ok true)
+    )
+  )
+)
 
