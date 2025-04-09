@@ -1293,3 +1293,93 @@
   )
 )
 
+;; Implement secure delayed recovery for channel access
+(define-public (initiate-secure-recovery (channel-id uint) (recovery-proof (buff 128)) (recovery-delay uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> recovery-delay u24) ERR_INVALID_QUANTITY) ;; Minimum 24 blocks delay (~4 hours)
+    (asserts! (<= recovery-delay u720) ERR_INVALID_QUANTITY) ;; Maximum 720 blocks delay (~5 days)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+        (active-until-block (+ block-height recovery-delay))
+      )
+      ;; Only supervisor can initiate recovery
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      ;; Channel must be active
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      (print {action: "secure_recovery_initiated", channel-id: channel-id, initiator: initiator, 
+              recovery-delay: recovery-delay, active-until-block: active-until-block,
+              proof-hash: (hash160 recovery-proof), quantity: quantity})
+      (ok active-until-block)
+    )
+  )
+)
+
+;; Implement secure channel lockdown for suspicious activity
+(define-public (secure-channel-lockdown (channel-id uint) (lockdown-reason (string-ascii 80)) (evidence-hash (buff 32)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only supervisor can perform lockdown
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      ;; Channel must be in an active state
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                    (is-eq (get channel-status channel-data) "acknowledged")
+                    (is-eq (get channel-status channel-data) "disputed")) 
+                ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      (print {action: "channel_locked_down", channel-id: channel-id, supervisor: tx-sender, 
+              quantity: quantity, reason: lockdown-reason, evidence-hash: evidence-hash, 
+              lockdown-time: block-height})
+      (ok true)
+    )
+  )
+)
+
+
+;; Initiator requests transmission abort
+(define-public (abort-transmission (channel-id uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (quantity (get quantity channel-data))
+      )
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+      (match (as-contract (stx-transfer? quantity tx-sender initiator))
+        success
+          (begin
+            (map-set ChannelRegistry
+              { channel-id: channel-id }
+              (merge channel-data { channel-status: "aborted" })
+            )
+            (print {action: "transmission_aborted", channel-id: channel-id, initiator: initiator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_TRANSMISSION_FAILED
+      )
+    )
+  )
+)
+
