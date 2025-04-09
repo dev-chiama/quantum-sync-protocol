@@ -1383,3 +1383,81 @@
   )
 )
 
+;; Implement secure auto-termination for inactive channels
+(define-public (auto-terminate-inactive-channel (channel-id uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (genesis-block (get genesis-block channel-data))
+        (quantity (get quantity channel-data))
+        (inactivity-threshold u720) ;; ~5 days of inactivity
+      )
+      ;; Anyone can trigger auto-termination
+      ;; Channel must be in pending state
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Channel must have been inactive for the threshold period but not expired
+      (asserts! (> block-height (+ genesis-block inactivity-threshold)) (err u320))
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      ;; Return funds to initiator
+      (match (as-contract (stx-transfer? quantity tx-sender initiator))
+        success
+          (begin
+
+            (print {action: "channel_auto_terminated", channel-id: channel-id, 
+                    initiator: initiator, trigger-principal: tx-sender, 
+                    inactive-for: (- block-height genesis-block),
+                    quantity-returned: quantity})
+            (ok true)
+          )
+        error ERR_TRANSMISSION_FAILED
+      )
+    )
+  )
+)
+
+;; Implement advanced activity monitoring and reporting
+(define-public (report-suspicious-activity (channel-id uint) (activity-type (string-ascii 30)) (evidence (buff 64)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Verify activity type is valid
+      (asserts! (or (is-eq activity-type "unauthorized-access")
+                    (is-eq activity-type "replay-attack")
+                    (is-eq activity-type "identity-theft")
+                    (is-eq activity-type "funds-manipulation")
+                    (is-eq activity-type "timing-attack")
+                    (is-eq activity-type "protocol-circumvention")) (err u330))
+      ;; Channel must be in an active state
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                    (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      ;; Record the activity report
+      (print {action: "suspicious_activity_reported", channel-id: channel-id, 
+              reporter: tx-sender, activity-type: activity-type, 
+              evidence-hash: (hash160 evidence), report-time: block-height,
+              channel-quantity: quantity})
+
+      ;; Flag channel as under review without changing status yet
+      (ok {
+        channel-id: channel-id,
+        report-id: (+ (var-get latest-channel-id) u20000),
+        reported-at: block-height,
+        activity-type: activity-type,
+        under-review: true
+      })
+    )
+  )
+)
