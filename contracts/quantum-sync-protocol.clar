@@ -500,3 +500,78 @@
     )
   )
 )
+
+;; Enable advanced security for high-value channels
+(define-public (enable-quantum-security (channel-id uint) (quantum-key (buff 32)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for channels above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "quantum_security_enabled", channel-id: channel-id, initiator: initiator, key-hash: (hash160 quantum-key)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic verification for high-value channels
+(define-public (verify-channel-cryptographically (channel-id uint) (message-hash (buff 32)) (signature (buff 65)) (signer principal))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (verification-result (unwrap! (secp256k1-recover? message-hash signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender target) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq signer initiator) (is-eq signer target)) (err u151))
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+
+      ;; Verify signature matches expected signer
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) signer) (err u153))
+
+      (print {action: "cryptographic_verification_complete", channel-id: channel-id, verifier: tx-sender, signer: signer})
+      (ok true)
+    )
+  )
+)
+
+;; Add channel metadata
+(define-public (attach-channel-metadata (channel-id uint) (metadata-type (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+      )
+      ;; Only authorized parties can add metadata
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender target) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get channel-status channel-data) "finalized")) (err u160))
+      (asserts! (not (is-eq (get channel-status channel-data) "reverted")) (err u161))
+      (asserts! (not (is-eq (get channel-status channel-data) "expired")) (err u162))
+
+      ;; Valid metadata types
+      (asserts! (or (is-eq metadata-type "packet-specs") 
+                   (is-eq metadata-type "transmission-proof")
+                   (is-eq metadata-type "integrity-check")
+                   (is-eq metadata-type "initiator-settings")) (err u163))
+
+      (print {action: "metadata_attached", channel-id: channel-id, metadata-type: metadata-type, 
+              metadata-digest: metadata-digest, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
