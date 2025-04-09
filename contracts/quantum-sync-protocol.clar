@@ -936,3 +936,67 @@
     )
   )
 )
+
+;; Implement channel encryption key rotation
+(define-public (rotate-channel-encryption (channel-id uint) (new-encryption-key (buff 32)) (previous-key-hash (buff 32)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for high-value channels
+      (asserts! (> quantity u1000) (err u290))
+      ;; Only initiator, target or supervisor can rotate keys
+      (asserts! (or (is-eq tx-sender initiator) 
+                   (is-eq tx-sender target)
+                   (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Channel must be active
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      (print {action: "encryption_key_rotated", channel-id: channel-id, rotated-by: tx-sender, 
+              rotation-time: block-height, new-key-hash: (hash160 new-encryption-key),
+              previous-key-hash: previous-key-hash})
+      (ok true)
+    )
+  )
+)
+
+;; Setup conditional release parameters for phased delivery
+(define-public (setup-conditional-release (channel-id uint) (conditions (list 5 (string-ascii 50))) (verification-principal principal))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> (len conditions) u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only initiator or supervisor can set conditions
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Verifier cannot be initiator or target
+      (asserts! (not (is-eq verification-principal initiator)) (err u300))
+      (asserts! (not (is-eq verification-principal target)) (err u301))
+      ;; Channel must be active
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      (print {action: "conditional_release_configured", channel-id: channel-id, initiator: initiator, 
+              target: target, conditions: conditions, verification-principal: verification-principal,
+              setup-time: block-height})
+      (ok true)
+    )
+  )
+)
