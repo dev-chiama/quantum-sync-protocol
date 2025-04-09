@@ -717,4 +717,79 @@
   )
 )
 
+;; Require multi-signature verification for high-value channels
+(define-public (enable-multi-signature-verification (channel-id uint) (required-signatures uint) (authorized-signers (list 5 principal)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for channels above threshold
+      (asserts! (> quantity u2500) (err u220))
+      ;; Only initiator or supervisor can enable multi-sig
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Validate parameters
+      (asserts! (> required-signatures u1) ERR_INVALID_QUANTITY)
+      (asserts! (<= required-signatures (len authorized-signers)) (err u221))
+      (asserts! (> (len authorized-signers) u1) ERR_INVALID_QUANTITY)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+
+      (print {action: "multi_sig_enabled", channel-id: channel-id, initiator: initiator, 
+              required-signatures: required-signatures, authorized-signers: authorized-signers})
+      (ok true)
+    )
+  )
+)
+
+
+;; Add cryptographic verification
+(define-public (add-cryptographic-proof (channel-id uint) (crypto-signature (buff 65)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender target)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (print {action: "crypto_proof_added", channel-id: channel-id, signer: tx-sender, signature: crypto-signature})
+      (ok true)
+    )
+  )
+)
+
+;; Transfer channel control
+(define-public (transfer-channel-control (channel-id uint) (new-controller principal) (auth-hash (buff 32)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (current-controller (get initiator channel-data))
+        (current-status (get channel-status channel-data))
+      )
+      ;; Only current controller or supervisor can transfer
+      (asserts! (or (is-eq tx-sender current-controller) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; New controller must be different
+      (asserts! (not (is-eq new-controller current-controller)) (err u210))
+      (asserts! (not (is-eq new-controller (get target channel-data))) (err u211))
+      ;; Only certain states allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "acknowledged")) ERR_ALREADY_PROCESSED)
+      ;; Update channel control
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { initiator: new-controller })
+      )
+      (print {action: "control_transferred", channel-id: channel-id, 
+              previous-controller: current-controller, new-controller: new-controller, auth-hash: (hash160 auth-hash)})
+      (ok true)
+    )
+  )
+)
+
 
