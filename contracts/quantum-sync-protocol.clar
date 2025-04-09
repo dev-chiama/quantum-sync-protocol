@@ -862,3 +862,77 @@
   )
 )
 
+;; Implement channel splitting for partial settlements
+(define-public (split-channel (channel-id uint) (split-amount uint) (split-justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (original-quantity (get quantity channel-data))
+        (packet-id (get packet-id channel-data))
+        (new-channel-id (+ (var-get latest-channel-id) u1))
+        (remaining-quantity (- original-quantity split-amount))
+      )
+      ;; Only initiator or supervisor can split
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Must be in pending status
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Split amount must be valid
+      (asserts! (> split-amount u0) ERR_INVALID_QUANTITY)
+      (asserts! (< split-amount original-quantity) ERR_INVALID_QUANTITY)
+
+      ;; Update original channel with reduced quantity
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { quantity: remaining-quantity })
+      )
+
+      ;; Create new channel with split amount
+      (var-set latest-channel-id new-channel-id)
+      (map-set ChannelRegistry
+        { channel-id: new-channel-id }
+        {
+          initiator: initiator,
+          target: target,
+          packet-id: packet-id,
+          quantity: split-amount,
+          channel-status: "pending",
+          genesis-block: block-height,
+          terminus-block: (+ block-height CHANNEL_LIFESPAN_BLOCKS)
+        }
+      )
+
+      (print {action: "channel_split", original-channel: channel-id, new-channel: new-channel-id, 
+              initiator: initiator, target: target, split-amount: split-amount, 
+              remaining-amount: remaining-quantity, justification: split-justification})
+      (ok new-channel-id)
+    )
+  )
+)
+
+;; Implement channel confirmation by target
+(define-public (confirm-channel-receipt (channel-id uint) (confirmation-hash (buff 32)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+      )
+      ;; Only target can confirm receipt
+      (asserts! (is-eq tx-sender target) ERR_UNAUTHORIZED)
+      ;; Channel must be pending
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      (print {action: "channel_confirmed", channel-id: channel-id, target: target, 
+              confirmation-time: block-height, confirmation-hash: confirmation-hash})
+      (ok true)
+    )
+  )
+)
