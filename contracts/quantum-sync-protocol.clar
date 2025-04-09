@@ -1461,3 +1461,94 @@
     )
   )
 )
+
+;; Implement enhanced identity verification for high-value channels
+(define-public (verify-channel-participant-identity (channel-id uint) (identity-proof (buff 128)) (verification-method (string-ascii 20)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for high-value channels
+      (asserts! (> quantity u10000) (err u340))
+      ;; Verify participant is associated with channel
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender target)) ERR_UNAUTHORIZED)
+      ;; Verify verification method is valid
+      (asserts! (or (is-eq verification-method "biometric")
+                    (is-eq verification-method "multi-factor")
+                    (is-eq verification-method "hardware-token")
+                    (is-eq verification-method "geo-verification")
+                    (is-eq verification-method "social-attestation")) (err u341))
+      ;; Channel must be in pending state
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+
+      ;; Record the identity verification
+      (print {action: "identity_verified", channel-id: channel-id, 
+              participant: tx-sender, verification-method: verification-method, 
+              proof-hash: (hash160 identity-proof), verification-time: block-height})
+
+      ;; Return verification details
+      (ok {
+        channel-id: channel-id,
+        verification-id: (+ (var-get latest-channel-id) u30000),
+        verified-principal: tx-sender,
+        verification-time: block-height,
+        verification-method: verification-method
+      })
+    )
+  )
+)
+
+;; Implement secure channel escrow with timed release
+(define-public (establish-timed-escrow (channel-id uint) (release-conditions (string-ascii 100)) (release-schedule uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> release-schedule u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= release-schedule u720) ERR_INVALID_QUANTITY) ;; Max 5 days
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+        (release-block (+ block-height release-schedule))
+      )
+      ;; Only initiator can establish escrow
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      ;; Channel must be in pending state
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      ;; Channel must not be expired
+      (asserts! (<= release-block (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+      ;; Only for channels with substantial value
+      (asserts! (> quantity u1000) (err u350))
+
+      ;; Update channel status to escrow
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { 
+          channel-status: "escrowed",
+          terminus-block: (+ release-block u144) ;; Add buffer period after release
+        })
+      )
+
+      (print {action: "escrow_established", channel-id: channel-id, 
+              initiator: initiator, target: target, quantity: quantity,
+              current-block: block-height, release-block: release-block, 
+              release-conditions: release-conditions})
+
+      (ok {
+        channel-id: channel-id,
+        escrow-id: (+ (var-get latest-channel-id) u40000),
+        release-block: release-block,
+        conditions: release-conditions
+      })
+    )
+  )
+)
+
