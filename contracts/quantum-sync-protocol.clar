@@ -1073,4 +1073,83 @@
   )
 )
 
+;; Implement secure channel rotation for long-lived connections
+(define-public (rotate-channel-credentials (channel-id uint) (new-packet-id uint) (rotation-proof (buff 64)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (old-packet-id (get packet-id channel-data))
+        (channel-status (get channel-status channel-data))
+        (rotation-time block-height)
+      )
+      ;; Only initiator or supervisor can rotate credentials
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Channel must be in appropriate state
+      (asserts! (or (is-eq channel-status "pending") 
+                   (is-eq channel-status "acknowledged")) ERR_ALREADY_PROCESSED)
+      ;; New packet ID must be different
+      (asserts! (not (is-eq new-packet-id old-packet-id)) (err u601))
+
+      ;; Update channel with new packet ID
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { packet-id: new-packet-id })
+      )
+
+      (print {action: "credentials_rotated", channel-id: channel-id, 
+              old-packet-id: old-packet-id, new-packet-id: new-packet-id,
+              initiator: initiator, rotation-time: rotation-time,
+              rotation-proof-hash: (hash160 rotation-proof)})
+      (ok true)
+    )
+  )
+)
+
+;; Apply adaptive security controls based on risk scoring
+(define-public (apply-risk-adaptive-controls (channel-id uint) (risk-score uint) (control-type (string-ascii 20)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (<= risk-score u100) ERR_INVALID_QUANTITY) ;; Risk score 0-100
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+        (channel-status (get channel-status channel-data))
+        (application-time block-height)
+      )
+      ;; Only supervisor can apply risk-adaptive controls
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      ;; Channel must be active
+      (asserts! (or (is-eq channel-status "pending") 
+                   (is-eq channel-status "acknowledged")) ERR_ALREADY_PROCESSED)
+
+      ;; Valid control types
+      (asserts! (or (is-eq control-type "enhanced-monitoring") 
+                   (is-eq control-type "multi-factor")
+                   (is-eq control-type "timing-restrictions")
+                   (is-eq control-type "volume-limiting")
+                   (is-eq control-type "geographic-restrict")) (err u701))
+
+      ;; Determine control level based on risk score
+      (let
+        (
+          (control-level (if (< risk-score u30) "standard"
+                           (if (< risk-score u70) "elevated" "high")))
+        )
+        (print {action: "risk_controls_applied", channel-id: channel-id, 
+                risk-score: risk-score, control-type: control-type, 
+                control-level: control-level, application-time: application-time})
+        (ok control-level)
+      )
+    )
+  )
+)
+
+
 
