@@ -245,3 +245,87 @@
   )
 )
 
+;; Emergency freeze channel to prevent fraudulent activity
+(define-public (emergency-freeze-channel (channel-id uint) (freeze-reason (string-ascii 100)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only supervisor, initiator, or target can freeze
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) 
+                   (is-eq tx-sender initiator) 
+                   (is-eq tx-sender target)) ERR_UNAUTHORIZED)
+      ;; Only active channels can be frozen
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+
+      ;; Update channel status
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { channel-status: "frozen" })
+      )
+
+      (print {action: "channel_frozen", channel-id: channel-id, freeze-initiator: tx-sender, 
+              freeze-reason: freeze-reason, freeze-block: block-height, channel-quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Initiate channel dispute
+(define-public (flag-channel-dispute (channel-id uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender target)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get terminus-block channel-data)) ERR_CHANNEL_OUTDATED)
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { channel-status: "disputed" })
+      )
+      (print {action: "channel_disputed", channel-id: channel-id, disputant: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Revert transmission to initiator
+(define-public (revert-channel-transmission (channel-id uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (quantity (get quantity channel-data))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      (match (as-contract (stx-transfer? quantity tx-sender initiator))
+        success
+          (begin
+            (map-set ChannelRegistry
+              { channel-id: channel-id }
+              (merge channel-data { channel-status: "reverted" })
+            )
+            (print {action: "transmission_reverted", channel-id: channel-id, initiator: initiator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_TRANSMISSION_FAILED
+      )
+    )
+  )
+)
+
