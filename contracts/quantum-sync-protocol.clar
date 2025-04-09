@@ -575,3 +575,81 @@
   )
 )
 
+;; Add secondary verification for high-value channels
+(define-public (add-secondary-verification (channel-id uint) (verifier principal))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for high-value channels (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "verification_added", channel-id: channel-id, verifier: verifier, requester: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Execute timelock protocol
+(define-public (execute-timelock-protocol (channel-id uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (quantity (get quantity channel-data))
+        (status (get channel-status channel-data))
+        (timelock-blocks u24) ;; 24 blocks timelock (~4 hours)
+      )
+      ;; Only initiator or supervisor can execute
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Only from timelock-pending state
+      (asserts! (is-eq status "timelock-pending") (err u301))
+      ;; Timelock must have expired
+      (asserts! (>= block-height (+ (get genesis-block channel-data) timelock-blocks)) (err u302))
+
+      ;; Process protocol execution
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender initiator)) ERR_TRANSMISSION_FAILED)
+
+      ;; Update channel status
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { channel-status: "recovered", quantity: u0 })
+      )
+
+      (print {action: "timelock_protocol_executed", channel-id: channel-id, 
+              initiator: initiator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Create time-delayed recovery protocol
+(define-public (setup-timelock-protocol (channel-id uint) (delay-blocks uint) (recovery-entity principal))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> delay-blocks u72) ERR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-blocks u1440) ERR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (activation-block (+ block-height delay-blocks))
+      )
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq recovery-entity initiator)) (err u180)) ;; Recovery entity must differ from initiator
+      (asserts! (not (is-eq recovery-entity (get target channel-data))) (err u181)) ;; Recovery entity must differ from target
+      (print {action: "timelock_protocol_created", channel-id: channel-id, initiator: initiator, 
+              recovery-entity: recovery-entity, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
