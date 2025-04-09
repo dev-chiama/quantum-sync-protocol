@@ -159,3 +159,89 @@
   )
 )
 
+;; Extend channel duration
+(define-public (extend-channel-timeline (channel-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (asserts! (> additional-blocks u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERR_INVALID_QUANTITY) ;; Max ~10 days extension
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data)) 
+        (target (get target channel-data))
+        (current-terminus (get terminus-block channel-data))
+        (updated-terminus (+ current-terminus additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender target) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (map-set ChannelRegistry
+        { channel-id: channel-id }
+        (merge channel-data { terminus-block: updated-terminus })
+      )
+      (print {action: "channel_extended", channel-id: channel-id, requester: tx-sender, new-terminus-block: updated-terminus})
+      (ok true)
+    )
+  )
+)
+
+;; Claim expired channel resources
+(define-public (reclaim-expired-channel (channel-id uint))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (quantity (get quantity channel-data))
+        (expiry (get terminus-block channel-data))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (asserts! (> block-height expiry) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? quantity tx-sender initiator))
+        success
+          (begin
+            (map-set ChannelRegistry
+              { channel-id: channel-id }
+              (merge channel-data { channel-status: "expired" })
+            )
+            (print {action: "expired_channel_reclaimed", channel-id: channel-id, initiator: initiator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_TRANSMISSION_FAILED
+      )
+    )
+  )
+)
+
+;; Initialize recovery process for lost access with time-lock security
+(define-public (initialize-recovery-process (channel-id uint) (recovery-principal principal) (recovery-proof (buff 64)))
+  (begin
+    (asserts! (valid-channel-id? channel-id) ERR_INVALID_CHANNEL_ID)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-id: channel-id }) ERR_NO_CHANNEL))
+        (initiator (get initiator channel-data))
+        (target (get target channel-data))
+        (recovery-request-time block-height)
+        (recovery-activation-time (+ block-height u144)) ;; 24-hour delay
+      )
+      ;; Only supervisor can initiate recovery
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      ;; Valid recovery principal must not be current principals
+      (asserts! (not (is-eq recovery-principal initiator)) (err u240))
+      (asserts! (not (is-eq recovery-principal target)) (err u241))
+      ;; Only active channels can start recovery
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+
+      (print {action: "recovery_initiated", channel-id: channel-id, initiator: initiator, 
+              recovery-principal: recovery-principal, request-time: recovery-request-time, 
+              activation-time: recovery-activation-time, recovery-proof-hash: (hash160 recovery-proof)})
+      (ok recovery-activation-time)
+    )
+  )
+)
+
